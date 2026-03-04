@@ -1,0 +1,6 @@
+{
+  "bundleId": "com.example.TranscribeTranslateApp",
+  "defaultTargetLanguage": "vie_Latn",
+  "workerMode": "mock",
+  "modelDownloadMode": "fake"
+}

@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+DerivedData/
+*.pyc
+__pycache__/
+.venv/
+worker/.venv/
+worker/models/
+worker/logs/
+app-output/
