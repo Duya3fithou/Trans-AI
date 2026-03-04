@@ -19,8 +19,16 @@ struct WorkerCommand: Codable {
 enum WorkerEventType: String, Codable {
     case status
     case downloadProgress
+    case partialSegment
     case segment
     case error
+}
+
+struct WorkerPartialPayload: Codable {
+    let partial_id: String
+    let start_seconds: Double
+    let end_seconds: Double
+    let source_text: String
 }
 
 struct WorkerSegmentPayload: Codable {
@@ -35,5 +43,6 @@ struct WorkerEvent: Codable {
     let type: WorkerEventType
     let message: String?
     let progress: Double?
+    let partial: WorkerPartialPayload?
     let segment: WorkerSegmentPayload?
 }

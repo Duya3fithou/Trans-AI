@@ -2,4 +2,6 @@ faster-whisper>=1.1.0
 ctranslate2>=4.6.0
 huggingface-hub>=0.31.0
 sentencepiece>=0.2.0
+numpy>=1.26,<2
+torch>=2.2.0
 transformers>=4.53.0

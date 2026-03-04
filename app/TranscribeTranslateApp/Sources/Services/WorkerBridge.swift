@@ -6,9 +6,17 @@ final class WorkerBridge: ObservableObject {
 
     var onEvent: ((WorkerEvent) -> Void)?
 
+    private let writeQueue = DispatchQueue(
+        label: "com.example.TranscribeTranslateApp.worker.write",
+        qos: .userInitiated
+    )
+    private let maxPendingAudioWrites = 8
+
     private var process: Process?
     private var stdinHandle: FileHandle?
     private var stdoutBuffer = Data()
+    private var pendingAudioWriteCount = 0
+    private var isStopping = false
 
     func start() throws {
         guard process == nil else { return }
@@ -47,6 +55,8 @@ final class WorkerBridge: ObservableObject {
                 self?.isRunning = false
                 self?.process = nil
                 self?.stdinHandle = nil
+                self?.pendingAudioWriteCount = 0
+                self?.isStopping = false
             }
         }
 
@@ -55,10 +65,12 @@ final class WorkerBridge: ObservableObject {
         self.process = process
         self.stdinHandle = stdinPipe.fileHandleForWriting
         self.isRunning = true
+        self.isStopping = false
     }
 
     func stop() {
         guard let process else { return }
+        isStopping = true
         try? sendCommand(
             WorkerCommand(
                 type: .stop,
@@ -70,10 +82,18 @@ final class WorkerBridge: ObservableObject {
             )
         )
 
-        process.terminate()
-        self.process = nil
+        try? stdinHandle?.close()
         self.stdinHandle = nil
-        self.isRunning = false
+        self.pendingAudioWriteCount = 0
+
+        // Give worker a short window to exit gracefully after `stop`.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard process.isRunning else { return }
+            process.terminate()
+            DispatchQueue.main.async {
+                self?.isRunning = false
+            }
+        }
     }
 
     func requestModelDownload(modelRoot: String) throws {
@@ -103,27 +123,81 @@ final class WorkerBridge: ObservableObject {
     }
 
     func sendAudioChunk(_ data: Data, sampleRate: Int = 16_000, channels: Int = 1) throws {
-        let base64 = data.base64EncodedString()
-        try sendCommand(
+        guard let stdinHandle else {
+            throw NSError(domain: "WorkerBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "Worker not started"])
+        }
+
+        if pendingAudioWriteCount >= maxPendingAudioWrites {
+            return
+        }
+
+        let payload = try encodeCommand(
             WorkerCommand(
                 type: .processAudio,
                 targetLanguage: nil,
                 modelRoot: nil,
-                audioBase64: base64,
+                audioBase64: data.base64EncodedString(),
                 sampleRate: sampleRate,
                 channels: channels
             )
         )
+        pendingAudioWriteCount += 1
+
+        writeQueue.async { [weak self] in
+            defer {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.pendingAudioWriteCount = max(self.pendingAudioWriteCount - 1, 0)
+                }
+            }
+
+            do {
+                try stdinHandle.write(contentsOf: payload)
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.isStopping else { return }
+                    self.onEvent?(
+                        WorkerEvent(
+                            type: .error,
+                            message: "Failed to send audio to worker: \(error.localizedDescription)",
+                            progress: nil,
+                            partial: nil,
+                            segment: nil
+                        )
+                    )
+                }
+            }
+        }
     }
 
     private func sendCommand(_ command: WorkerCommand) throws {
         guard let stdinHandle else {
             throw NSError(domain: "WorkerBridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "Worker not started"])
         }
+        let payload = try encodeCommand(command)
+        try writeSync(payload, to: stdinHandle)
+    }
+
+    private func encodeCommand(_ command: WorkerCommand) throws -> Data {
         let encoded = try JSONEncoder().encode(command)
         var withNewline = encoded
         withNewline.append(0x0A)
-        try stdinHandle.write(contentsOf: withNewline)
+        return withNewline
+    }
+
+    private func writeSync(_ payload: Data, to handle: FileHandle) throws {
+        var capturedError: Error?
+        writeQueue.sync {
+            do {
+                try handle.write(contentsOf: payload)
+            } catch {
+                capturedError = error
+            }
+        }
+
+        if let capturedError {
+            throw capturedError
+        }
     }
 
     private func appendStdoutData(_ data: Data) {

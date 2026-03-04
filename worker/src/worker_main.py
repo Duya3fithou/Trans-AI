@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 from model_downloader import ModelDownloader
 from pipeline import ProcessingPipeline
-from protocol import emit_event
+from protocol import PipeClosedError, emit_event
 
 
 def log(message: str) -> None:
@@ -25,6 +25,7 @@ def handle_command(
     command_type = command.get("type")
 
     if command_type == "downloadModels":
+        pipeline.set_model_root(command["modelRoot"])
         downloader.download_all(command["modelRoot"])
         return True
 
@@ -39,16 +40,27 @@ def handle_command(
             sample_rate=int(command.get("sampleRate", 16000)),
             channels=int(command.get("channels", 1)),
         )
-        emit_event(
-            "segment",
-            segment={
-                "segment_id": result.segment_id,
-                "start_seconds": result.start_seconds,
-                "end_seconds": result.end_seconds,
-                "source_text": result.source_text,
-                "translated_text": result.translated_text,
-            },
-        )
+        if result.partial is not None:
+            emit_event(
+                "partialSegment",
+                partial={
+                    "partial_id": result.partial.partial_id,
+                    "start_seconds": result.partial.start_seconds,
+                    "end_seconds": result.partial.end_seconds,
+                    "source_text": result.partial.source_text,
+                },
+            )
+        if result.segment is not None:
+            emit_event(
+                "segment",
+                segment={
+                    "segment_id": result.segment.segment_id,
+                    "start_seconds": result.segment.start_seconds,
+                    "end_seconds": result.segment.end_seconds,
+                    "source_text": result.segment.source_text,
+                    "translated_text": result.segment.translated_text,
+                },
+            )
         return True
 
     if command_type == "stop":
@@ -63,7 +75,10 @@ def main() -> int:
     downloader = ModelDownloader(log=log)
     pipeline = ProcessingPipeline()
 
-    emit_event("status", message="Worker booted")
+    try:
+        emit_event("status", message="Worker booted")
+    except PipeClosedError:
+        return 0
     log("Worker started")
 
     for line in sys.stdin:
@@ -78,9 +93,14 @@ def main() -> int:
 
         try:
             should_continue = handle_command(command, downloader, pipeline)
+        except PipeClosedError:
+            break
         except Exception as exc:  # pragma: no cover - top-level protection
             log(f"Command failure: {exc}")
-            emit_event("error", message=f"Command failure: {exc}")
+            try:
+                emit_event("error", message=f"Command failure: {exc}")
+            except PipeClosedError:
+                break
             should_continue = True
 
         if not should_continue:
